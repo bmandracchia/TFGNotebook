@@ -29,9 +29,13 @@ psf = single(psf);
 
 % Deconvolucionar 2D con opciones predeterminadas
 
-tic;
 res = deconvlucy(img_n, psf, 30);
-toc;
+code_to_measure = @() deconvlucy(img_n, psf, 30);
+
+% Medir el tiempo de ejecución
+execution_time = timeit(code_to_measure);
+disp(['Tiempo de ejecución: ', num2str(execution_time), ' segundos']); = deconvlucy(img_n, psf, 30);
+
 
 
 % Mostrar los resultados finales junto con la versión original y borrosa
