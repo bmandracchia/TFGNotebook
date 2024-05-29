@@ -34,7 +34,7 @@ code_to_measure = @() deconvlucy(img_n, psf, 30);
 
 % Medir el tiempo de ejecución
 execution_time = timeit(code_to_measure);
-disp(['Tiempo de ejecución: ', num2str(execution_time), ' segundos']); = deconvlucy(img_n, psf, 30);
+disp(['Tiempo de ejecución: ', num2str(execution_time), ' segundos']);
 
 
 
@@ -43,3 +43,8 @@ figure;
 subplot(1, 3, 1); imshow(uint8(img)); title('Imagen original');
 subplot(1, 3, 2); imshow(uint8(img_n)); title('Imagen con ruido');
 subplot(1, 3, 3); imshow(uint8(res)); title('Imagen deconvolucionada');
+
+%Guardamos la figura resultante
+
+save_path = 'Path/donde/guardar/imagen.png';
+saveas(gcf, save_path);
