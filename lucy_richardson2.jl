@@ -40,14 +40,19 @@ function richardson_lucy_iterative2(measured, psf;
                                    progress = nothing)
 
     otf, conv_temp = plan_conv(measured, psf, conv_dims) 
-    ### Add options for PSF inizialization -> traditional, wiener, butterworth, and WB
-    ### These methods actually change otf_conj, probably they should be added as additional functions
-    if psf_bp !== nothing
-        otf_conj, _ = plan_conv(measured, psf_bp, conv_dims) 
-    else
-        otf_conj = conj.(otf)
-    end
     # initializer
+    ### Different PSF inizialization methods are possible generating custom psf_bp using the relative functions 
+    # if psf_bp == nothing
+    #     psf_bp = deepcopy(psf)
+    #     reverse!(psf_bp)
+    # end
+    # otf_conj, _ = plan_conv(measured, psf_bp, conv_dims) 
+    if psf_bp == nothing
+        otf_conj = conj.(otf)
+    else
+        otf_conj, _ = plan_conv(measured, psf_bp, conv_dims) 
+    end
+    # Apply threshold
     rec =  map(x -> x >= threshold ? x : threshold, measured) 
     
     #### THIS PART NEED TO BE DEBUGGED!!!
@@ -118,61 +123,73 @@ function BackProjector(PSF_fp; bp_type="traditional", alpha=0.001, beta=1, n=10,
         error("Input PSF must be 2D or 3D")
     end
 
-    Scx, Scy, Scz = (Sx + 1) / 2, (Sy + 1) / 2, (Sz + 1) / 2
+    # Scx, Scy, Scz = (Sx + 1) / 2, (Sy + 1) / 2, (Sz + 1) / 2
 
     if verboseFlag
         println("Back projector type: $bp_type")
     end
 
     # Flip PSF
-    flippedPSF = reverse(PSF_fp, dims=:)
+    flippedPSF = deepcopy(PSF_fp)
+    reverse!(flippedPSF)
 
-    # Fourier Transform of flipped PSF
-    OTF_flip = fft(ifftshift(flippedPSF))
-    OTF_abs = fftshift(abs.(OTF_flip))
-    OTFmax = maximum(OTF_abs)
-    OTF_abs_norm = OTF_abs / OTFmax
-
-    # Resolution cutoff
-    resx, resy, resz = if resFlag == 0
-        FWHMx, FWHMy, FWHMz = size_to_fwhm(Sx, Sy, Sz)
-        (FWHMx / √2, FWHMy / √2, FWHMz / √2)
-    elseif resFlag == 1
-        size_to_fwhm(Sx, Sy, Sz)
-    elseif resFlag == 2
-        dims == 2 ? (iRes[1], iRes[2], 0) : (iRes[1], iRes[2], iRes[3])
-    else
-        error("Invalid resFlag: $resFlag. Must be 0, 1, or 2.")
-    end
-
-    # Pixel size and frequency cutoff
-    px, py, pz = 1 / Sx, 1 / Sy, 1 / max(1, Sz)
-    tx, ty, tz = 1 / (resx * px), 1 / (resy * py), 1 / (resz * pz)
-
-    if verboseFlag
-        println("Resolution cutoff (spatial): $resx x $resy x $resz")
-        println("Resolution cutoff (Fourier): $tx x $ty x $tz")
-    end
-
-    PSF_bp, OTF_bp = nothing, nothing
-
-    # Process each back projector type
     if bp_type == "traditional"
         PSF_bp = flippedPSF
         OTF_bp = fft(ifftshift(PSF_bp))
-    elseif bp_type == "gaussian"
-        PSF_bp = gen_gaussianPSF(Sx, Sy, Sz, resx, resy, resz, dims)
-        OTF_bp = fft(ifftshift(PSF_bp))
-    elseif bp_type == "butterworth"
-        PSF_bp, OTF_bp = butterworth_filter(Sx, Sy, Sz, tx, ty, tz, beta, n, dims)
-    elseif bp_type == "wiener"
-        OTF_flip_norm = OTF_flip / OTFmax
-        OTF_bp = OTF_flip_norm ./ (abs.(OTF_flip_norm).^2 .+ alpha)
-        PSF_bp = fftshift(real(ifft(OTF_bp)))
-    elseif bp_type == "wiener-butterworth"
-        PSF_bp, OTF_bp = wiener_butterworth_filter(OTF_flip, OTF_abs_norm, alpha, beta, Sx, Sy, Sz, tx, ty, tz, n, dims)
+
     else
-        error("Unsupported bp_type: $bp_type")
+
+        # Fourier Transform of flipped PSF
+        OTF_flip = fft(ifftshift(flippedPSF))
+        OTF_abs = fftshift(abs.(OTF_flip))
+        OTFmax = maximum(OTF_abs)
+
+        if bp_type == "wiener"
+            OTF_flip_norm = OTF_flip / OTFmax
+            OTF_bp = OTF_flip_norm ./ (abs.(OTF_flip_norm).^2 .+ alpha)
+            PSF_bp = fftshift(real(ifft(OTF_bp)))
+        else
+
+            # Resolution cutoff
+            resx, resy, resz = if resFlag == 0
+                FWHMx, FWHMy, FWHMz = size_to_fwhm(Sx, Sy, Sz)
+                (FWHMx / √2, FWHMy / √2, FWHMz / √2)
+            elseif resFlag == 1
+                size_to_fwhm(Sx, Sy, Sz)
+            elseif resFlag == 2
+                dims == 2 ? (iRes[1], iRes[2], 0) : (iRes[1], iRes[2], iRes[3])
+            else
+                error("Invalid resFlag: $resFlag. Must be 0, 1, or 2.")
+            end
+
+            if bp_type == "gaussian"
+                PSF_bp = gen_gaussianPSF(Sx, Sy, Sz, resx, resy, resz, dims)
+                OTF_bp = fft(ifftshift(PSF_bp))
+            else
+
+                # Pixel size and frequency cutoff
+                px, py, pz = 1 / Sx, 1 / Sy, 1 / max(1, Sz)
+                tx, ty, tz = 1 / (resx * px), 1 / (resy * py), 1 / (resz * pz)
+
+                if verboseFlag
+                    println("Resolution cutoff (spatial): $resx x $resy x $resz")
+                    println("Resolution cutoff (Fourier): $tx x $ty x $tz")
+                end
+
+                PSF_bp, OTF_bp = nothing, nothing
+
+                # Process each back projector type
+                
+                if bp_type == "butterworth"
+                    PSF_bp, OTF_bp = butterworth_filter(Sx, Sy, Sz, tx, ty, tz, beta, n, dims)
+                elseif bp_type == "wiener-butterworth"
+                    OTF_abs_norm = OTF_abs / OTFmax
+                    PSF_bp, OTF_bp = wiener_butterworth_filter(OTF_flip, OTF_abs_norm, alpha, beta, Sx, Sy, Sz, tx, ty, tz, n, dims)
+                else
+                    error("Unsupported bp_type: $bp_type")
+                end
+            end
+        end
     end
 
     return convert(typeof(PSF_fp), PSF_bp), OTF_bp
