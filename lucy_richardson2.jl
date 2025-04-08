@@ -1,106 +1,74 @@
+using DeconvOptim: gradient
 
 """
-    richardson_lucy_iterative2(measured, psf; <keyword arguments>)
+    deconvRL(measured, psf; psf_bp=nothing, regularizer=nothing, λ=0.05, iterations=100, conv_dims=1:ndims(psf), threshold=0, progress=nothing)
 
-Classical iterative Richardson-Lucy iteration scheme for deconvolution.
-`measured` is the measured array and `psf` the point spread function.
-Converges slower than the optimization approach of `deconvolution`
+    Classical iterative Richardson-Lucy iteration scheme for deconvolution.
+    `measured` is the measured array and `psf` the point spread function.
+    Converges slower than the optimization approach of `deconvolution`.
 
-# Keyword Arguments
-- `psf_bp=nothing`: A psf for backpropagation.
-- `regularizer=nothing`: A regularizer function. Can be changed
-- `λ=0.05`: A float indicating the total weighting of the regularizer with 
-    respect to the global loss function
-- `iterations=100`: Specifies number of iterations.
-- `progress`: if not `nothing`, the progress will be monitored in a summary dictionary as obtained by
-              DeconvOptim.options_trace_deconv()
+    # Keyword Arguments
+    - `psf_bp=nothing`: A psf for backpropagation. If not provided, the conjugate of the OTF is used.
+    - `regularizer=nothing`: A regularizer function. Can be used to impose constraints or smoothness.
+    - `λ=0.05`: A float indicating the total weighting of the regularizer with respect to the global loss function.
+    - `iterations=100`: Specifies the number of iterations to perform.
+    - `conv_dims=1:ndims(psf)`: Specifies the dimensions along which convolution is performed.
+    - `threshold=0`: Minimum threshold for the reconstructed image to avoid negative values.
+    - `progress=nothing`: If not `nothing`, progress will be monitored and logged.
 
-# Example
-```julia-repl
-julia> using DeconvOptim, TestImages, Colors, Noise;
-
-julia> img = Float32.(testimage("resolution_test_512"));
-
-julia> psf = Float32.(generate_psf(size(img), 30));
-
-julia> img_b = conv(img, psf);
-
-julia> img_n = poisson(img_b, 300);
-
-julia> @time res = richardson_lucy_iterative(img_n, psf);
-```
+    # Example
 """
-function richardson_lucy_iterative2(measured, psf; 
+function deconvRL(measured, psf; 
                                    psf_bp=nothing,
                                    regularizer=nothing,
                                    λ=0.05,
                                    iterations=100,
                                    conv_dims=1:ndims(psf),
-                                   threshold = 0,
-                                   progress = nothing)
+                                   threshold=0,
+                                   progress=nothing)
 
-    otf, conv_temp = plan_conv(measured, psf, conv_dims) 
-    # initializer
-    ### Different PSF inizialization methods are possible generating custom psf_bp using the relative functions 
-    # if psf_bp == nothing
-    #     psf_bp = deepcopy(psf)
-    #     reverse!(psf_bp)
-    # end
-    # otf_conj, _ = plan_conv(measured, psf_bp, conv_dims) 
-    if psf_bp == nothing
-        otf_conj = conj.(otf)
-    else
-        otf_conj, _ = plan_conv(measured, psf_bp, conv_dims) 
+    otf, conv_temp = plan_conv(measured, psf, conv_dims)
+
+    # Initialize otf_conj based on psf_bp
+    otf_conj = isnothing(psf_bp) ? conj.(otf) : plan_conv(measured, psf_bp, conv_dims)[1]
+
+    # Apply threshold and initialize reconstruction
+    rec = max.(measured, threshold)
+
+    # Precompute gradient buffer if regularizer is provided
+    buffer_grad = isnothing(regularizer) ? nothing : similar(rec)
+    if !isnothing(regularizer)
+        buffer_grad .= Base.invokelatest(gradient, regularizer, rec)[1]
     end
-    # Apply threshold
-    rec =  map(x -> x >= threshold ? x : threshold, measured) 
-    
-    #### THIS PART NEED TO BE DEBUGGED!!!
-    # buffer for gradient
-    # we need Base.invokelatest because of world age issues with generated
-    # regularizers
-    buffer_grad =  let 
+    ∇reg(x) = buffer_grad .= Base.invokelatest(gradient, regularizer, x)[1]
+
+    buffer = similar(measured)
+
+    # Define iteration functions
+    function iter!(rec)
+        buffer .= measured ./ (conv_temp(rec, otf))
+        buffer .= conv_temp(rec, otf_conj)
         if !isnothing(regularizer)
-            Base.invokelatest(gradient, regularizer, rec)[1]
-        else
-            nothing
+            rec .-= λ .* ∇reg(rec)
         end
     end
 
-    ∇reg(x) = buffer_grad .= Base.invokelatest(gradient, regularizer, x)[1]
-
-    buffer = copy(measured)
-
-    iter_without_reg(rec) = begin
-        buffer .= measured ./ (conv_temp(rec, otf))
-        conv_temp(buffer, otf_conj)
-    end
-    iter_with_reg(rec) = buffer .= (iter_without_reg(rec) .- λ .* ∇reg(rec))
-
-    iter = isnothing(regularizer) ? iter_without_reg : iter_with_reg
-
-    # the loss function is only needed for logging, not for LR itself
-    loss(myrec) = begin
+    # Loss function for logging
+    loss = progress === nothing ? nothing : (myrec -> begin
         fwd = conv_temp(myrec, otf)
-        return sum(fwd .- measured .* log.(fwd))
-    end
+        sum(fwd .- measured .* log.(fwd))
+    end)
 
-    # logging part
-    tmp_time = 0.0
+    # Logging setup
     if progress !== nothing
         record_progress!(progress, rec, 0, loss(rec), 0.0, 1.0)
-        tmp_time=time()
     end
-    code_time = 0.0
 
-    # do actual optimization
+    # Perform iterations
     for i in 1:iterations
-        rec .*= iter(rec)
+        iter!(rec)
         if progress !== nothing
-            # do not count the time for evaluating the loss here.
-            code_time += time() .- tmp_time
-            record_progress!(progress, copy(rec), i, loss(rec), code_time, 1.0)
-            tmp_time=time()
+            record_progress!(progress, copy(rec), i, loss(rec), 0.0, 1.0)
         end
     end
 
