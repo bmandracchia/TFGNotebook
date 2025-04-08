@@ -1,4 +1,4 @@
-using DeconvOptim: gradient
+using DeconvOptim: gradient, get_plan, fft_or_rfft, p_conv_aux!
 
 """
     deconvRL(measured, psf; psf_bp=nothing, regularizer=nothing, λ=0.05, iterations=100, conv_dims=1:ndims(psf), threshold=0, progress=nothing)
@@ -18,14 +18,16 @@ using DeconvOptim: gradient
 
     # Example
 """
-function deconvRL(measured, psf; 
-                                   psf_bp=nothing,
-                                   regularizer=nothing,
-                                   λ=0.05,
-                                   iterations=100,
-                                   conv_dims=1:ndims(psf),
-                                   threshold=0,
-                                   progress=nothing)
+function deconvRL(
+    measured::AbstractArray{T}, psf::AbstractArray{T};
+    psf_bp::Union{Nothing, AbstractArray{T}} = nothing,
+    regularizer::Union{Nothing, Function} = nothing,
+    λ::Float64 = 0.05,
+    iterations::Int = 100,
+    conv_dims::AbstractVector{Int} = 1:ndims(psf),
+    threshold::T = zero(T),
+    progress::Union{Nothing, Function} = nothing
+) where {T}
 
     otf, conv_temp = plan_conv(measured, psf, conv_dims)
 
@@ -42,7 +44,7 @@ function deconvRL(measured, psf;
     end
     ∇reg(x) = buffer_grad .= Base.invokelatest(gradient, regularizer, x)[1]
 
-    buffer = similar(measured)
+    buffer = similar(measured)  # Preallocate once
 
     # Define iteration functions
     function iter!(rec)
@@ -75,92 +77,150 @@ function deconvRL(measured, psf;
     return rec
 end
 
+# The following code is commented out as it is not used in the current implementation.
+# function deconvRL(measured::AbstractArray{T}, psf::AbstractArray{T}; 
+#                   psf_bp::Union{Nothing, AbstractArray{T}}=nothing,
+#                   regularizer::Union{Nothing, Function}=nothing,
+#                   λ::Float64=0.05,
+#                   iterations::Int=100,
+#                   conv_dims::AbstractVector{Int}=1:ndims(psf),
+#                   threshold::T=zero(T),
+#                   progress::Union{Nothing, Function}=nothing) where {T}
+
+#     otf, conv_temp! = plan_conv!(measured, psf, conv_dims)
+
+#     # Initialize otf_conj based on psf_bp
+#     otf_conj = isnothing(psf_bp) ? conj.(otf) : plan_conv(measured, psf_bp, conv_dims)[1]
+
+#     # Apply threshold and initialize reconstruction
+#     rec = max.(measured, threshold)
+
+#     # Precompute gradient buffer if regularizer is provided
+#     buffer_grad = isnothing(regularizer) ? nothing : similar(rec)
+#     ∇reg = isnothing(regularizer) ? x -> nothing : x -> begin
+#         Base.invokelatest(gradient, regularizer, x)[1]
+#     end
+
+#     buffer = similar(measured)  # Preallocate once
+
+#     # Define iteration functions
+#     function iter!(rec)
+#         conv_temp!(buffer, rec, otf)
+#         buffer .= measured ./ buffer
+#         conv_temp!(buffer, buffer, otf_conj)
+#         rec .*= buffer
+#         if !isnothing(regularizer)
+#             buffer_grad .= ∇reg(rec)
+#             rec .-= λ .* buffer_grad
+#         end
+#         rec .= max.(rec, threshold)  # Ensure non-negativity
+#     end
+
+#     # Loss function for logging
+#     loss = progress === nothing ? nothing : (myrec -> begin
+#         conv_temp!(buffer, myrec, otf)
+#         sum(buffer .- measured .* log.(buffer))
+#     end)
+
+#     # Logging setup
+#     if progress !== nothing
+#         record_progress!(progress, rec, 0, loss(rec), 0.0, 1.0)
+#     end
+
+#     # Perform iterations
+#     for i in 1:iterations
+#         iter!(rec)
+#         if progress !== nothing
+#             record_progress!(progress, copy(rec), i, loss(rec), 0.0, 1.0)
+#         end
+#     end
+
+#     return rec
+
+# end
+
+# function plan_conv!(u::AbstractArray{T, N}, v::AbstractArray{T, M}, dims=ntuple(+, N)) where {T, N, M}
+#     # Retrieve the FFT plan for the given type
+#     plan = get_plan(T)
+
+#     # Precompute the forward and inverse FFT plans for `u`
+#     P = plan(u, dims)
+#     P_inv = inv(P)
+
+#     # Precompute the Fourier transform of `u` and store it
+#     u_ft_stor = P * u
+
+#     # Compute the Fourier transform of `v` (PSF or kernel)
+#     v_ft = fft_or_rfft(T)(v, dims)
+
+#     # Preallocate the output array for convolution results
+#     out = similar(u)
+
+#     # Define the efficient convolution function
+#     function conv!(output, input, v_ft=v_ft)
+#         p_conv_aux!(P, P_inv, input, v_ft, u_ft_stor, output)
+#         return output
+#     end
+
+#     return v_ft, conv!
+# end
 
 ###
 # using FFTW, LinearAlgebra, Statistics
 
 function BackProjector(PSF_fp; bp_type="traditional", alpha=0.001, beta=1, n=10, resFlag=1, iRes=[0, 0, 0], verboseFlag=false)
-    # Initialize dimensions
     dims = ndims(PSF_fp)
-    if dims == 2
-        Sx, Sy = size(PSF_fp)
-        Sz = 1
-    elseif dims == 3
-        Sx, Sy, Sz = size(PSF_fp)
-    else
-        error("Input PSF must be 2D or 3D")
-    end
-
-    # Scx, Scy, Scz = (Sx + 1) / 2, (Sy + 1) / 2, (Sz + 1) / 2
+    Sx, Sy, Sz = dims == 2 ? (size(PSF_fp)..., 1) : size(PSF_fp)
+    flippedPSF = reverse(PSF_fp)
 
     if verboseFlag
         println("Back projector type: $bp_type")
     end
 
-    # Flip PSF
-    flippedPSF = deepcopy(PSF_fp)
-    reverse!(flippedPSF)
-
     if bp_type == "traditional"
         PSF_bp = flippedPSF
         OTF_bp = fft(ifftshift(PSF_bp))
-
-    else
-
-        # Fourier Transform of flipped PSF
-        OTF_flip = fft(ifftshift(flippedPSF))
-        OTF_abs = fftshift(abs.(OTF_flip))
-        OTFmax = maximum(OTF_abs)
-
-        if bp_type == "wiener"
-            OTF_flip_norm = OTF_flip / OTFmax
-            OTF_bp = OTF_flip_norm ./ (abs.(OTF_flip_norm).^2 .+ alpha)
-            PSF_bp = fftshift(real(ifft(OTF_bp)))
-        else
-
-            # Resolution cutoff
-            resx, resy, resz = if resFlag == 0
-                FWHMx, FWHMy, FWHMz = size_to_fwhm(Sx, Sy, Sz)
-                (FWHMx / √2, FWHMy / √2, FWHMz / √2)
-            elseif resFlag == 1
-                size_to_fwhm(Sx, Sy, Sz)
-            elseif resFlag == 2
-                dims == 2 ? (iRes[1], iRes[2], 0) : (iRes[1], iRes[2], iRes[3])
-            else
-                error("Invalid resFlag: $resFlag. Must be 0, 1, or 2.")
-            end
-
-            if bp_type == "gaussian"
-                PSF_bp = gen_gaussianPSF(Sx, Sy, Sz, resx, resy, resz, dims)
-                OTF_bp = fft(ifftshift(PSF_bp))
-            else
-
-                # Pixel size and frequency cutoff
-                px, py, pz = 1 / Sx, 1 / Sy, 1 / max(1, Sz)
-                tx, ty, tz = 1 / (resx * px), 1 / (resy * py), 1 / (resz * pz)
-
-                if verboseFlag
-                    println("Resolution cutoff (spatial): $resx x $resy x $resz")
-                    println("Resolution cutoff (Fourier): $tx x $ty x $tz")
-                end
-
-                PSF_bp, OTF_bp = nothing, nothing
-
-                # Process each back projector type
-                
-                if bp_type == "butterworth"
-                    PSF_bp, OTF_bp = butterworth_filter(Sx, Sy, Sz, tx, ty, tz, beta, n, dims)
-                elseif bp_type == "wiener-butterworth"
-                    OTF_abs_norm = OTF_abs / OTFmax
-                    PSF_bp, OTF_bp = wiener_butterworth_filter(OTF_flip, OTF_abs_norm, alpha, beta, Sx, Sy, Sz, tx, ty, tz, n, dims)
-                else
-                    error("Unsupported bp_type: $bp_type")
-                end
-            end
-        end
+        return PSF_bp, OTF_bp
     end
 
-    return convert(typeof(PSF_fp), PSF_bp), OTF_bp
+    OTF_flip = fft(ifftshift(flippedPSF))
+    OTF_abs = fftshift(abs.(OTF_flip))
+    OTFmax = maximum(OTF_abs)
+
+    if bp_type == "wiener"
+        OTF_flip_norm = OTF_flip / OTFmax
+        OTF_bp = OTF_flip_norm ./ (abs.(OTF_flip_norm).^2 .+ alpha)
+        PSF_bp = fftshift(real(ifft(OTF_bp)))
+        return PSF_bp, OTF_bp
+    end
+
+    resx, resy, resz = resFlag == 0 ? size_to_fwhm(Sx, Sy, Sz) ./ √2 :
+                       resFlag == 1 ? size_to_fwhm(Sx, Sy, Sz) :
+                       resFlag == 2 ? (dims == 2 ? (iRes[1], iRes[2], 0) : (iRes[1], iRes[2], iRes[3])) :
+                       error("Invalid resFlag: $resFlag. Must be 0, 1, or 2.")
+
+    if bp_type == "gaussian"
+        PSF_bp = gen_gaussianPSF(Sx, Sy, Sz, resx, resy, resz, dims)
+        OTF_bp = fft(ifftshift(PSF_bp))
+        return PSF_bp, OTF_bp
+    end
+
+    px, py, pz = 1 / Sx, 1 / Sy, 1 / max(1, Sz)
+    tx, ty, tz = 1 / (resx * px), 1 / (resy * py), 1 / (resz * pz)
+
+    if verboseFlag
+        println("Resolution cutoff (spatial): $resx x $resy x $resz")
+        println("Resolution cutoff (Fourier): $tx x $ty x $tz")
+    end
+
+    if bp_type == "butterworth"
+        return butterworth_filter(Sx, Sy, Sz, tx, ty, tz, beta, n, dims)
+    elseif bp_type == "wiener-butterworth"
+        OTF_abs_norm = OTF_abs / OTFmax
+        return wiener_butterworth_filter(OTF_flip, OTF_abs_norm, alpha, beta, Sx, Sy, Sz, tx, ty, tz, n, dims)
+    else
+        error("Unsupported bp_type: $bp_type")
+    end
 end
 
 # Helper function for Gaussian PSF generation (2D or 3D)
@@ -169,16 +229,14 @@ function gen_gaussianPSF(Sx, Sy, Sz, FWHMx, FWHMy, FWHMz, dims)
     if dims == 2
         x = range(-Sx/2, Sx/2, length=Sx)
         y = range(-Sy/2, Sy/2, length=Sy)
-        X, Y = ndgrid(x, y)
-        PSF = exp.(-((X.^2 / (2 * sigx^2)) .+ (Y.^2 / (2 * sigy^2))))
+        PSF = [exp(-((xi^2 / (2 * sigx^2)) + (yi^2 / (2 * sigy^2)))) for xi in x, yi in y]
     elseif dims == 3
         x = range(-Sx/2, Sx/2, length=Sx)
         y = range(-Sy/2, Sy/2, length=Sy)
         z = range(-Sz/2, Sz/2, length=Sz)
-        X, Y, Z = ndgrid(x, y, z)
-        PSF = exp.(-((X.^2 / (2 * sigx^2)) .+ (Y.^2 / (2 * sigy^2)) .+ (Z.^2 / (2 * sigz^2))))
+        PSF = [exp(-((xi^2 / (2 * sigx^2)) + (yi^2 / (2 * sigy^2)) + (zi^2 / (2 * sigz^2)))) for xi in x, yi in y, zi in z]
     end
-    return PSF / sum(PSF) # Normalize
+    return PSF ./ sum(PSF) # Normalize
 end
 
 # Helper function for Butterworth filter (2D or 3D)
@@ -187,14 +245,12 @@ function butterworth_filter(Sx, Sy, Sz, tx, ty, tz, beta, n, dims)
     if dims == 2
         kx = range(-Sx/2, Sx/2, length=Sx)
         ky = range(-Sy/2, Sy/2, length=Sy)
-        KX, KY = ndgrid(kx, ky)
-        mask = 1 ./ sqrt.(1 .+ ee .* ((KX / tx).^2 .+ (KY / ty).^2).^n)
+        mask = [1 / sqrt(1 + ee * ((kx[i] / tx)^2 + (ky[j] / ty)^2)^n) for i in 1:Sx, j in 1:Sy]
     elseif dims == 3
         kx = range(-Sx/2, Sx/2, length=Sx)
         ky = range(-Sy/2, Sy/2, length=Sy)
         kz = range(-Sz/2, Sz/2, length=Sz)
-        KX, KY, KZ = ndgrid(kx, ky, kz)
-        mask = 1 ./ sqrt.(1 .+ ee .* ((KX / tx).^2 .+ (KY / ty).^2 .+ (KZ / tz).^2).^n)
+        mask = [1 / sqrt(1 + ee * ((kx[i] / tx)^2 + (ky[j] / ty)^2 + (kz[k] / tz)^2)^n) for i in 1:Sx, j in 1:Sy, k in 1:Sz]
     end
     OTF_bp = ifftshift(mask)
     PSF_bp = fftshift(real(ifft(OTF_bp)))
@@ -209,14 +265,12 @@ function wiener_butterworth_filter(OTF_flip, OTF_abs_norm, alpha, beta, Sx, Sy, 
     if dims == 2
         kx = range(-Sx/2, Sx/2, length=Sx)
         ky = range(-Sy/2, Sy/2, length=Sy)
-        KX, KY = ndgrid(kx, ky)
-        mask = 1 ./ sqrt.(1 .+ ee .* ((KX / tx).^2 .+ (KY / ty).^2).^n)
+        mask = [1 / sqrt(1 + ee * ((kx[i] / tx)^2 + (ky[j] / ty)^2)^n) for i in 1:Sx, j in 1:Sy]
     elseif dims == 3
         kx = range(-Sx/2, Sx/2, length=Sx)
         ky = range(-Sy/2, Sy/2, length=Sy)
         kz = range(-Sz/2, Sz/2, length=Sz)
-        KX, KY, KZ = ndgrid(kx, ky, kz)
-        mask = 1 ./ sqrt.(1 .+ ee .* ((KX / tx).^2 .+ (KY / ty).^2 .+ (KZ / tz).^2).^n)
+        mask = [1 / sqrt(1 + ee * ((kx[i] / tx)^2 + (ky[j] / ty)^2 + (kz[k] / tz)^2)^n) for i in 1:Sx, j in 1:Sy, k in 1:Sz]
     end
     mask = ifftshift(mask)
     OTF_bp = mask .* OTF_Wiener
@@ -226,24 +280,5 @@ end
 
 # Helper to calculate FWHM
 function size_to_fwhm(Sx, Sy, Sz)
-    FWHMx = 1.0 / Sx
-    FWHMy = 1.0 / Sy
-    FWHMz = 1.0 / max(1, Sz)
-    return FWHMx, FWHMy, FWHMz
-end
-
-# Helper to generate grids of coordinates for multi-dimensional spaces.
-function ndgrid(v1, v2, v3=nothing)
-    if isnothing(v3)
-        # 2D case
-        X = reshape(v1, :, 1) .* ones(Float32, 1, length(v2))  # Create the grid for v1
-        Y = ones(Float32, length(v1), 1) .* reshape(v2, 1, :)  # Create the grid for v2
-        return X, Y
-    else
-        # 3D case
-        X = reshape(v1, :, 1, 1) .* ones(Float32, 1, length(v2), length(v3))  # Create grid for v1
-        Y = ones(Float32, length(v1), 1, 1) .* reshape(v2, 1, :, 1)          # Create grid for v2
-        Z = ones(Float32, length(v1), length(v2), 1) .* reshape(v3, 1, 1, :) # Create grid for v3
-        return X, Y, Z
-    end
+    return 1.0 / Sx, 1.0 / Sy, 1.0 / max(1, Sz)
 end
