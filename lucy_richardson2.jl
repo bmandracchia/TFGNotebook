@@ -5,7 +5,6 @@ using DeconvOptim: gradient, get_plan, fft_or_rfft, p_conv_aux!
 
     Classical iterative Richardson-Lucy iteration scheme for deconvolution.
     `measured` is the measured array and `psf` the point spread function.
-    Converges slower than the optimization approach of `deconvolution`.
 
     # Keyword Arguments
     - `psf_bp=nothing`: A psf for backpropagation. If not provided, the conjugate of the OTF is used.
@@ -26,9 +25,15 @@ function deconvRL(
     iterations::Int = 100,
     conv_dims::AbstractVector{Int} = 1:ndims(psf),
     threshold::T = zero(T),
+    shift::Bool = false,
     progress::Union{Nothing, Function} = nothing
 ) where {T}
 
+    if shift
+        psf = ifftshift(psf)  # Shift the PSF to the center of the array
+        psf_bp = isnothing(psf_bp) ? nothing : ifftshift(psf_bp)  # Shift the PSF for backpropagation
+    end
+    
     otf, conv_temp = plan_conv(measured, psf, conv_dims)
 
     # Initialize otf_conj based on psf_bp
@@ -46,14 +51,20 @@ function deconvRL(
 
     buffer = similar(measured)  # Preallocate once
 
-    # Define iteration functions
-    function iter!(rec)
-        buffer .= measured ./ (conv_temp(rec, otf))
-        buffer .= conv_temp(rec, otf_conj)
-        if !isnothing(regularizer)
-            rec .-= λ .* ∇reg(rec)
-        end
+    # Define iteration functions 
+    function iter_without_reg!(rec)
+        buffer .= conv_temp(rec, otf)
+        buffer .= measured ./ buffer
+        rec .*= conv_temp(buffer, otf_conj)
     end
+
+    function iter_with_reg!(rec)
+        buffer .= conv_temp(rec, otf)
+        buffer .= measured ./ buffer
+        rec .*= conv_temp(buffer, otf_conj) .- λ .* ∇reg(rec)
+    end
+
+    iter! = isnothing(regularizer) ? iter_without_reg! : iter_with_reg!
 
     # Loss function for logging
     loss = progress === nothing ? nothing : (myrec -> begin
@@ -70,7 +81,7 @@ function deconvRL(
     for i in 1:iterations
         iter!(rec)
         if progress !== nothing
-            record_progress!(progress, copy(rec), i, loss(rec), 0.0, 1.0)
+            record_progress!(progress, rec, i, loss(rec), 0.0, 1.0)
         end
     end
 
